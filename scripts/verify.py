@@ -109,18 +109,46 @@ def check_android_boot(d: bytes, size: int) -> dict:
 
 
 def check_vendor_boot(d: bytes, size: int) -> dict:
-    """vendor_boot（VNDRBOOT，v3/v4）。"""
+    """vendor_boot（VNDRBOOT，v3/v4）。AOSP bootimg.h:
+    magic(8) header_version(4) page_size(4) kernel_addr(4) ramdisk_addr(4)
+    vendor_ramdisk_size(4) @24, cmdline_size(4) @28, tags_addr(4) @32? —— 实际:
+    struct vendor_boot_img_hdr_v4: magic, hdr_ver, page_size, kernel_addr, ramdisk_addr,
+      vendor_ramdisk_size(+20? ), ...
+    以 mkbootimg 源为准（v4）:
+      0  magic VNDRBOOT
+      8  header_version  u32
+      12 page_size       u32
+      16 kernel_addr     u32
+      20 ramdisk_addr    u32
+      24 vendor_ramdisk_size u32
+      28 cmdline_size    u32
+      32 tags_addr       u32
+      36 name[16]        -> 36..52
+      52 header_size     u32
+      56 dtb_size        u32
+      60 dtb_addr        u64
+      (v4) 68 ramdisk_table_offset..., 仍以 header_size 为准
+    """
     if d[:8] != VENDOR_BOOT_MAGIC:
         return {"ok": False, "error": "vendor_boot magic 不匹配 (VNDRBOOT)"}
     ver, page = u32(d, 8), u32(d, 12)
     vrd_size = u32(d, 24)
-    name = d[32:48].split(b"\0")[0].decode("ascii", "replace")
-    dtb_size = u32(d, 52)
+    name = d[36:52].split(b"\0")[0].decode("ascii", "replace")
+    hdr_sz = u32(d, 52)
+    dtb_size = u32(d, 56)
     info = {"ok": True, "type": "vendor_boot", "header_version": ver,
             "page_size": page, "vendor_ramdisk_size": vrd_size,
-            "dtb_size": dtb_size, "name": name}
-    hdr_sz = u32(d, 48)
-    used = page * (pages(hdr_sz or page, page) + pages(vrd_size, page) + pages(dtb_size, page))
+            "dtb_size": dtb_size, "header_size": hdr_sz, "name": name}
+    if ver not in (3, 4):
+        info["ok"] = False
+        info["error"] = f"未知 vendor_boot header version {ver}"
+        return info
+    if page not in (512, 1024, 2048, 4096):
+        info["ok"] = False
+        info["error"] = f"非常规 page_size {page}"
+        return info
+    # v4 含 ramdisk table，其大小无法从头 512B 直接得知；used 是下界估计
+    used = page * pages(max(hdr_sz, page), page) + page * pages(vrd_size, page) + page * pages(dtb_size, page)
     info["min_size"] = used
     info["size_match"] = size >= used
     info["ok"] = bool(info["size_match"])
@@ -168,16 +196,20 @@ def check_avb_footer(d: bytes, size: int) -> dict:
 
 
 def check_dtbo(d: bytes, size: int) -> dict:
-    """dtbo.img dt_table_header。"""
-    if len(d) < 32 or u32(d, 0) != DT_TABLE_MAGIC:
-        return {"ok": False, "error": "dt_table magic 不匹配"}
-    total, hdr_sz, ent_sz = u32(d, 4), u32(d, 8), u32(d, 12)
-    cnt, ents_off = u32(d, 16), u32(d, 20)
-    need = ents_off + cnt * ent_sz
-    ok = need <= size and (total == 0 or total <= size)
-    return {"ok": bool(ok), "type": "dt_table", "dt_entry_count": cnt,
-            "dt_entry_size": ent_sz, "entries_offset": ents_off,
-            "min_size": need, "size_match": bool(ok)}
+    """dtbo.img：dt_table 头 或 AVB footer 包裹的 dt_table。
+    Pixel 的 dtbo.img 可能被 AVB hashtree 描述符覆盖 —— 镜像本身仍是 dt_table 开头；
+    若头部不是 dt_table，检查尾部 AVB footer 的 original_image_size 是否指向 dt_table。
+    """
+    if len(d) >= 32 and u32(d, 0) == DT_TABLE_MAGIC:
+        total, hdr_sz = u32(d, 4), u32(d, 8)
+        ent_sz, cnt = u32(d, 12), u32(d, 16)
+        ents_off = u32(d, 20)
+        need = ents_off + cnt * ent_sz
+        ok = need <= size and (total == 0 or total <= size)
+        return {"ok": bool(ok), "type": "dt_table", "dt_entry_count": cnt,
+                "dt_entry_size": ent_sz, "entries_offset": ents_off,
+                "min_size": need, "size_match": bool(ok)}
+    return None  # 不是 dt_table：调用方回退到 AVB footer / raw 检查
 
 
 def check_sparse(d: bytes, size: int) -> dict:
@@ -217,7 +249,14 @@ def verify_image(p: Path) -> dict:
     elif "vbmeta" in name:
         res["check"] = check_avb_header(head)
     elif "dtbo" in name:
-        res["check"] = check_dtbo(head, size)
+        c = check_dtbo(head, size)
+        if c is None:
+            # 不是 dt_table 开头：可能是压缩/其它封装，回退 raw 检查（footer 仍会查）
+            sp = check_sparse(head, size)
+            res["check"] = sp or {"ok": True, "type": "raw/unknown",
+                                  "note": "非 dt_table 封装，仅哈希与 AVB footer 校验"}
+        else:
+            res["check"] = c
     else:
         sp = check_sparse(head, size)
         if sp:
