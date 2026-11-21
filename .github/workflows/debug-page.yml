@@ -9,7 +9,7 @@ jobs:
           pip install playwright -q
           python3 -m playwright install chromium --with-deps >/dev/null 2>&1
           python3 - <<'EOF'
-          import asyncio, json
+          import asyncio
           from playwright.async_api import async_playwright
 
           async def main():
@@ -19,28 +19,38 @@ jobs:
                   pg = await b.new_page()
                   pg.on("request", lambda r: reqs.append(r.url))
                   await pg.goto("https://developers.google.com/android/images?hl=en",
-                                wait_until="networkidle", timeout=90000)
-                  await pg.wait_for_timeout(4000)
+                                wait_until="domcontentloaded", timeout=90000)
+                  await pg.wait_for_timeout(3000)
+                  # 尝试点击 Acknowledge
+                  for sel in ("text=Acknowledge", "button:has-text('Acknowledge')",
+                              "devsite-terms >> text=Acknowledge", "a:has-text('Acknowledge')"):
+                      try:
+                          el = await pg.query_selector(sel)
+                          if el:
+                              await el.click()
+                              print("CLICKED via", sel)
+                              break
+                      except Exception as e:
+                          print("click fail", sel, str(e)[:80])
+                  await pg.wait_for_timeout(6000)
                   html = await pg.content()
                   open("rendered.html", "w").write(html)
-                  # 提取全部工厂包链接
-                  links = await pg.eval_on_selector_all(
-                      "a[href*='dl.google.com']",
-                      "els => els.map(e => e.href)")
+                  links = await pg.eval_on_selector_all("a[href*='dl.google.com']",
+                                                        "els => els.map(e => e.href)")
                   open("links.txt", "w").write("\n".join(links))
-                  print("RENDERED bytes:", len(html))
-                  print("DL LINKS:", len(links))
-                  for l in links[:5]: print("  ", l)
+                  print("bytes:", len(html), "links:", len(links))
+                  for l in links[:3]: print("  ", l)
+                  await b.close()
               open("requests.txt", "w").write("\n".join(sorted(set(
                   u for u in reqs if "google" in u and not any(
-                      x in u for x in (".js?", "gstatic.com/devrel", "fonts", ".css", ".svg", ".png", "playwright"))))))
-              print("REQ SAVED")
+                      x in u for x in (".js", "gstatic", "fonts", ".css", ".svg", ".png",
+                                       "analytics", "googletagmanager", "playwright"))))))
           asyncio.run(main())
           EOF
-          echo "== 数据类请求 =="; cat requests.txt | head -30
+          echo "== requests =="; head -25 requests.txt; echo "== links count =="; wc -l < links.txt
       - uses: actions/upload-artifact@v4
         with:
-          name: probe4
+          name: probe5
           path: |
             rendered.html
             links.txt
