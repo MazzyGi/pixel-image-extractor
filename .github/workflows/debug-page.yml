@@ -5,47 +5,38 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - run: |
-          pip install playwright -q
-          python3 -m playwright install chromium --with-deps >/dev/null 2>&1 || true
-          # 从渲染页面拿 bluejay 包 URL+SHA
-          python3 - <<'EOF'
-          import subprocess, json
-          subprocess.run(["python3", "scripts/resolve_build.py", "--save-page", "page.html",
-                          "--device", "bluejay", "--json"], check=False)
-          EOF
-        # 上面脚本不存在于 debug 环境 —— 改为 checkout 后运行
       - uses: actions/checkout@v4
       - run: |
           pip install playwright -q
           python3 -m playwright install chromium --with-deps >/dev/null 2>&1 || true
           python3 scripts/resolve_build.py --save-page page.html --device bluejay --json > r.json
-          cat r.json
           URL=$(python3 -c "import json;print(json.load(open('r.json'))['url'])")
           SHA=$(python3 -c "import json;print(json.load(open('r.json'))['sha256'])")
-          # 下载工厂包（Actions 网络快）
           curl -sL -o f.zip "$URL"
           echo "$SHA  f.zip" | sha256sum -c -
           unzip -o -q f.zip -d fx
           inner=$(ls fx/*/image-*.zip)
-          unzip -o -q "$inner" -d imgs vendor_boot.img dtbo.img init_boot.img boot.img
+          echo "== image zip 内容 =="; unzip -l "$inner" | head -40
+          mkdir -p imgs
+          unzip -o -q "$inner" -d imgs || true
           python3 - <<'EOF'
-          import struct, json
-          for n in ("vendor_boot.img", "dtbo.img", "init_boot.img", "boot.img"):
-              d = open(f"imgs/{n}","rb").read(600)
-              print("==", n, "magic:", d[:8].hex(), d[:8])
-              if n == "vendor_boot.img":
-                  print("  hdr_ver", struct.unpack_from("<I", d, 8)[0],
-                        "page", struct.unpack_from("<I", d, 12)[0],
-                        "vrd_sz", struct.unpack_from("<I", d, 24)[0],
-                        "name", d[36:52],
-                        "hdr_sz", struct.unpack_from("<I", d, 52)[0],
-                        "dtb_sz", struct.unpack_from("<I", d, 56)[0])
-                  import os
-                  print("  file size:", os.path.getsize(f"imgs/{n}"))
+          import struct, os, glob
+          for n in sorted(glob.glob("imgs/vendor_boot*.img") + glob.glob("imgs/dtbo*.img") + glob.glob("imgs/*boot*.img")):
+              d = open(n, "rb").read(512)
+              print("==", os.path.basename(n), "size:", os.path.getsize(n), "magic:", d[:8])
+              if d[:8] == b"VNDRBOOT":
+                  f = lambda o: struct.unpack_from("<I", d, o)[0]
+                  print("   hdr_ver", f(8), "page", f(12), "vrd_sz", f(24),
+                        "name", d[36:52], "hdr_sz", f(52), "dtb_sz", f(56))
+          dt = open("imgs/dtbo.img", "rb").read(64)
+          print("dtbo first 64B:", dt[:32].hex())
           EOF
       - uses: actions/upload-artifact@v4
         with:
           name: vb-heads
-          path: imgs/
+          path: |
+            imgs/vendor_boot*.img
+            imgs/dtbo.img
+            imgs/boot.img
           retention-days: 3
+          if-no-files-found: ignore
