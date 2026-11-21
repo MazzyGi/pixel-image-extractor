@@ -6,10 +6,17 @@ jobs:
     steps:
       - run: |
           set -x
-          curl -sL -A "Mozilla/5.0" "https://developers.google.com/android/images.md.txt?hl=en" -o images.md.txt
-          wc -c images.md.txt
-          head -80 images.md.txt
-          grep -c "factory-" images.md.txt || true
-          grep -m5 "husky" images.md.txt || true
+          # 常见 devsite 数据路径
+          for u in \
+            "https://developers.google.com/android/images-data.json" \
+            "https://developers.google.com/android/data/images.json" \
+            "https://developers.google.com/android/images.js" ; do
+            echo "== $u"; curl -sL -A "Mozilla/5.0" -o tmp.out -w "%{http_code} %{size_download}\n" "$u"; head -c 300 tmp.out; echo; done
+          # 页面 HTML 里的 script src 全列表（找 app_loader 拉的数据）
+          curl -sL -A "Mozilla/5.0" "https://developers.google.com/android/images" -o page.html
+          wc -c page.html
+          grep -oE 'src="[^"]+\.js[^"]*"' page.html | head -20
+          # 页面内联 script 中是否有 fetch/xhr 调用
+          grep -oE '(fetch|\.json)[^"]{0,80}' page.html | head -20
       - uses: actions/upload-artifact@v4
-        with: {name: md, path: images.md.txt, retention-days: 1}
+        with: {name: page, path: page.html, retention-days: 1}
