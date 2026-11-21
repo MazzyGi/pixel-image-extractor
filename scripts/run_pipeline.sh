@@ -11,18 +11,24 @@ KEEP_FACTORY="${5:-false}"
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 WORK="$ROOT/work/$DEVICE"
+PAGE_CACHE="$ROOT/work/page.html"
 mkdir -p "$WORK"
 
 echo "== [1/5] 解析版本 =="
-python3 "$ROOT/scripts/resolve_build.py" --device "$DEVICE" ${DATE:+--date "$DATE"} \
-    ${BUILD_ID:+--build-id "$BUILD_ID"} --json > "$WORK/resolve.json"
+if [ ! -s "$PAGE_CACHE" ]; then
+  python3 "$ROOT/scripts/resolve_build.py" --save-page "$PAGE_CACHE" --list | head -8
+fi
+python3 "$ROOT/scripts/resolve_build.py" --page-cache "$PAGE_CACHE" --device "$DEVICE" \
+    ${DATE:+--date "$DATE"} ${BUILD_ID:+--build-id "$BUILD_ID"} --json > "$WORK/resolve.json"
 cat "$WORK/resolve.json"
 URL=$(python3 -c "import json;print(json.load(open('$WORK/resolve.json'))['url'])")
+SHA=$(python3 -c "import json;print(json.load(open('$WORK/resolve.json'))['sha256'])")
 VERSION=$(python3 -c "import json;print(json.load(open('$WORK/resolve.json'))['version'])")
+DEVNAME=$(python3 -c "import json;print(json.load(open('$WORK/resolve.json'))['device'])")
 TAG="$DEVICE-$VERSION"
 
 echo "== [2/5] 下载工厂包 =="
-python3 "$ROOT/scripts/download.py" "$URL" "$WORK/factory.zip"
+python3 "$ROOT/scripts/download.py" "$URL" "$WORK/factory.zip" --hash "$SHA"
 
 echo "== [3/5] 解压提取 =="
 python3 "$ROOT/scripts/extract.py" "$WORK/factory.zip" "$WORK"
@@ -32,9 +38,9 @@ python3 "$ROOT/scripts/verify.py" "$WORK/images" --out "$WORK/verify.json"
 
 echo "== [5/5] 生成清单 =="
 python3 "$ROOT/scripts/make_release.py" "$WORK" --tag "$TAG" \
-  --device "$(python3 -c "import json;print(json.load(open('$WORK/resolve.json'))['device'])")" \
+  --device "$DEVNAME" \
   --version "$VERSION" --factory-url "$URL" \
-  --factory-size "$(stat -c%s "$WORK/factory.zip")" \
+  --factory-size "$(stat -c%s "$WORK/factory.zip")" --factory-sha "$SHA" \
   --upload-glob "$UPLOAD_RE"
 
 echo "== 完成: $WORK =="

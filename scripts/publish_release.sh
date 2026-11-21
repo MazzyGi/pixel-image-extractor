@@ -37,11 +37,13 @@ done
 
 # 3. 报告文件
 for f in SHA256SUMS links.md verify.json resolve.json; do
-  [ -f "$DIR/$f" ] && cp "$DIR/$f" "/tmp/$f"
+  [ -f "$DIR/$f" ] || true
 done
 # links.md / SHA256SUMS 放到上传列表
 [ -f "$DIR/SHA256SUMS" ] && ASSETS+=("$DIR/SHA256SUMS")
 [ -f "$DIR/links.md" ]   && ASSETS+=("$DIR/links.md")
+[ -f "$DIR/verify.json" ] && ASSETS+=("$DIR/verify.json")
+[ -f "$DIR/resolve.json" ] && ASSETS+=("$DIR/resolve.json")
 
 # 4. Release 说明
 DEVICE_NAME=$(python3 -c "import json;print(json.load(open('$DIR/resolve.json'))['device'])")

@@ -47,15 +47,17 @@ jobs:
       matrix: ${{ steps.mk.outputs.matrix }}
     steps:
       - uses: actions/checkout@v4
-      - name: 解析设备 -> 版本
+      - name: 解析设备 -> 版本（Playwright 渲染官方页面）
         id: mk
         run: |
           export DEVICES="${{ github.event.inputs.devices || env.DEFAULT_DEVICES }}"
           export DATE="${{ github.event.inputs.date || '' }}"
           export BUILD_ID="${{ github.event.inputs.build_id || '' }}"
           echo "设备: $DEVICES 日期: '$DATE' 版本: '$BUILD_ID'"
-          # 抓一次页面，供所有设备复用
-          python3 scripts/resolve_build.py --list >/dev/null   # 隐式验证页面可抓取
+          mkdir -p work
+          pip install playwright -q
+          python3 -m playwright install chromium --with-deps >/dev/null 2>&1 || python3 -m playwright install chromium >/dev/null 2>&1
+          python3 scripts/resolve_build.py --save-page work/page.html --list | head -40
           python3 - <<'EOF' > matrix.json
           import json, subprocess, sys, os
           devices = os.environ.get("DEVICES", "").split()
@@ -63,13 +65,17 @@ jobs:
           build_id = os.environ.get("BUILD_ID", "")
           include = []
           for d in devices:
-              args = ["python3", "scripts/resolve_build.py", "--device", d, "--json"]
+              args = ["python3", "scripts/resolve_build.py", "--page-cache", "work/page.html",
+                      "--device", d, "--json"]
               if build_id: args += ["--build-id", build_id]
               elif date:   args += ["--date", date]
               r = json.loads(subprocess.check_output(args))
-              include.append({"device": d, "version": r["version"], "url": r["url"]})
+              include.append({"device": d, "version": r["version"], "url": r["url"],
+                              "sha256": r["sha256"], "name": r["device"],
+                              "android": r["android"]})
           json.dump({"include": include}, sys.stdout)
           EOF
+          cat matrix.json
           echo "matrix=$(cat matrix.json | tr '\n' ' ')" >> "$GITHUB_OUTPUT"
 
   build:
@@ -88,15 +94,19 @@ jobs:
       - name: 显示磁盘空间
         run: df -h / /mnt | tee -a "$GITHUB_STEP_SUMMARY"
 
-      - name: 下载工厂包（断点续传，失败自动重试）
+      - name: 下载工厂包（断点续传 + 官方 SHA256 校验，失败自动重试）
         run: |
           mkdir -p work/${{ matrix.device }}
           for i in 1 2 3 4 5; do
             echo "== 下载尝试 $i =="
-            python3 scripts/download.py "${{ matrix.url }}" "work/${{ matrix.device }}/factory.zip" && break
+            python3 scripts/download.py "${{ matrix.url }}" "work/${{ matrix.device }}/factory.zip" \
+              --hash "${{ matrix.sha256 }}" && break
             [ "$i" = 5 ] && exit 1
             sleep 10
           done
+          cat > "work/${{ matrix.device }}/resolve.json" <<EOF
+          {"codename": "${{ matrix.device }}", "device": "${{ matrix.name }}", "version": "${{ matrix.version }}", "android": "${{ matrix.android }}", "url": "${{ matrix.url }}", "sha256": "${{ matrix.sha256 }}"}
+          EOF
 
       - name: 解压提取分区镜像
         run: python3 scripts/extract.py work/${{ matrix.device }}/factory.zip work/${{ matrix.device }}
