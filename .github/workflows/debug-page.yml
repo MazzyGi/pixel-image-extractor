@@ -4,29 +4,12 @@ jobs:
   dump:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
       - run: |
-          python3 - <<'EOF'
-          import sys, re
-          sys.path.insert(0, "scripts")
-          import resolve_build as rb
-          html = rb.fetch_page()
-          open("page.html", "w").write(html)
-          print("page bytes:", len(html))
-          # 所有 h1/h2/h3 的 id 与文本
-          for m in re.finditer(r'<(h[123])[^>]*id="([^"]*)"[^>]*>(.*?)</\1>', html, re.S|re.I):
-              print("HEAD", m.group(1), "id=", m.group(2), "text=", re.sub(r"<[^>]+>","",m.group(3)).strip()[:40])
-          # 总数
-          print("h2 count:", len(re.findall(r"<h2", html, re.I)))
-          # 表格行样本（前2个含 dl.google.com 链接的）
-          n=0
-          for m in re.finditer(r"<tr[^>]*>(.*?)</tr>", html, re.S|re.I):
-              if "dl.google.com" in m.group(1) and n<2:
-                  print("ROW SAMPLE:", m.group(1)[:600].replace("\n"," "))
-                  n+=1
-          # zip 链接形态
-          links = re.findall(r'href="([^"]*dl\.google\.com[^"]*\.zip)"', html)
-          print("zip links:", len(links), links[:2])
-          EOF
+          set -x
+          curl -sL -A "Mozilla/5.0" "https://developers.google.com/android/images.md.txt?hl=en" -o images.md.txt
+          wc -c images.md.txt
+          head -80 images.md.txt
+          grep -c "factory-" images.md.txt || true
+          grep -m5 "husky" images.md.txt || true
       - uses: actions/upload-artifact@v4
-        with: {name: page, path: page.html, retention-days: 1}
+        with: {name: md, path: images.md.txt, retention-days: 1}
