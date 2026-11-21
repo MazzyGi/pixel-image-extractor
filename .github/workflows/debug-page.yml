@@ -6,22 +6,20 @@ jobs:
     steps:
       - run: |
           set -x
-          BASE="https://www.gstatic.com/devrel-devsite/prod/vc11e4c9d4c060345ba98585d538d4546e842f4a6ee5c5f9e85be4bd345767217/developers/js"
-          curl -sL "$BASE/devsite_devsite_filterable_json_module.js" -o fj.js
-          wc -c fj.js
-          # 组件取数逻辑
-          grep -oE 'fetch\([^)]{0,120}\)' fj.js | head -5
-          grep -oE '"[^"]{0,80}\.json[^"]{0,80}"' fj.js | sort -u | head -10
-          grep -oE 'src=["'"'"'][^"'"'"']{5,120}' fj.js | head -10
-          # 页面正文区找 devsite-filterable-json 元素及其属性（数据 url 常在属性上）
-          curl -sL -A "Mozilla/5.0" "https://developers.google.com/android/images" -o page.html
-          grep -oE '<devsite-filterable-json[^>]{0,400}>' page.html | head -3
-          grep -oE 'devsite-[a-z-]*table[a-z-]*' page.html | sort -u
-          grep -oE 'data-[a-z-]*url[^ =]{0,3}="[^"]{0,150}"' page.html | sort -u | head
+          # Wayback：找最近快照
+          curl -sL "http://archive.org/wayback/available?url=developers.google.com/android/images&timestamp=20261101" -o wb.json; cat wb.json
+          SNAP=$(python3 -c "import json;print(json.load(open('wb.json'))['archived_snapshots']['closest']['url'])" 2>/dev/null)
+          echo "SNAP=$SNAP"
+          if [ -n "$SNAP" ]; then curl -sL "$SNAP" -o wb.html; wc -c wb.html; grep -c "dl.google.com" wb.html || true; fi
+          # 另一个官方静态源：页面是否还响应 ?format=table / amp
+          for u in "https://developers.google.com/android/images?amp=1" "https://developers.google.com/android/images?hl=en&format=INDEXABLE"; do
+            echo "== $u"; curl -sL -A "Mozilla/5.0" -o /tmp/x.out -w "%{http_code} %{size_download}\n" "$u"
+          done
       - uses: actions/upload-artifact@v4
         with:
-          name: probe2
+          name: probe3
           path: |
-            fj.js
-            page.html
+            wb.json
+            wb.html
           retention-days: 1
+          if-no-files-found: ignore
