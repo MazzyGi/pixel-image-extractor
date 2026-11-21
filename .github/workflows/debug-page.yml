@@ -5,18 +5,28 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - run: |
-          set -x
-          # 常见 devsite 数据路径
-          for u in \
-            "https://developers.google.com/android/images-data.json" \
-            "https://developers.google.com/android/data/images.json" \
-            "https://developers.google.com/android/images.js" ; do
-            echo "== $u"; curl -sL -A "Mozilla/5.0" -o tmp.out -w "%{http_code} %{size_download}\n" "$u"; head -c 300 tmp.out; echo; done
-          # 页面 HTML 里的 script src 全列表（找 app_loader 拉的数据）
-          curl -sL -A "Mozilla/5.0" "https://developers.google.com/android/images" -o page.html
-          wc -c page.html
-          grep -oE 'src="[^"]+\.js[^"]*"' page.html | head -20
-          # 页面内联 script 中是否有 fetch/xhr 调用
-          grep -oE '(fetch|\.json)[^"]{0,80}' page.html | head -20
+          set +e
+          probe() { code=$(curl -sL -A "Mozilla/5.0" -o /tmp/p.out -w "%{http_code}" "$1"); sz=$(wc -c < /tmp/p.out); echo "$code $sz $1"; if [ "$code" = 200 ] && [ "$sz" -gt 20000 ]; then cp /tmp/p.out "ok_$(echo $1 | md5sum | cut -c1-6).out"; fi; }
+          # 老版/其它镜像数据源
+          probe "https://developers.google.com/android/images?hl=en&old=1"
+          probe "https://developers.google.com/android/images/nexus"
+          probe "https://developers.google.com/android/images-images"
+          probe "https://storage.googleapis.com/android-builds-store/manifests/images.json"
+          probe "https://www.googleapis.com/android/images"
+          probe "https://developers.google.com/android/images.md"
+          probe "https://developers.google.com/android/images.md.txt?hl=en&full=1"
+          probe "https://developers.google.com/android/ota.md.txt"
+          # 关键：页面 app_loader.js 到底加载什么
+          curl -sL "https://www.gstatic.com/devrel-devsite/prod/vc11e4c9d4c060345ba98585d538d4546e842f4a6ee5c5f9e85be4bd345767217/developers/js/app_loader.js" -o app_loader.js
+          wc -c app_loader.js
+          grep -oE '"[^"]*(json|table|content)[^"]*"' app_loader.js | sort -u | head
+          grep -oE "fetch\([^)]*\)" app_loader.js | head
+          ls -la ok_*.out 2>/dev/null
       - uses: actions/upload-artifact@v4
-        with: {name: page, path: page.html, retention-days: 1}
+        with:
+          name: probe
+          path: |
+            app_loader.js
+            ok_*.out
+          retention-days: 1
+          if-no-files-found: ignore
