@@ -1,0 +1,151 @@
+name: build
+
+on:
+  workflow_dispatch:
+    inputs:
+      devices:
+        description: "设备代号（空格分隔，如: panther husky）"
+        required: true
+        default: "panther"
+      date:
+        description: "目标日期 YYYYMMDD（选 ≤ 该日期的最新版；留空 = 最新）"
+        required: false
+        default: ""
+      build_id:
+        description: "精确版本号（优先于 date，如 AP4A.250105.002）"
+        required: false
+        default: ""
+      upload_images:
+        description: "上传到 Release 的镜像正则"
+        required: false
+        default: '^(init_boot|boot|vendor_boot|dtbo|vbmeta.*|bootloader|radio)\.img$'
+      keep_factory:
+        description: "同时上传完整工厂包 zip（>2GiB 会被 GitHub 拒绝）"
+        type: boolean
+        required: false
+        default: false
+  schedule:
+    - cron: "30 3 * * 1"   # 每周一 03:30 UTC；设备列表改下面 env.DEFAULT_DEVICES
+  workflow_call:
+
+env:
+  DEFAULT_DEVICES: "panther"     # 定时构建的设备
+  DEFAULT_UPLOAD_RE: '^(init_boot|boot|vendor_boot|dtbo|vbmeta.*|bootloader|radio)\.img$'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      matrix: ${{ steps.mk.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: 解析设备 -> 版本
+        id: mk
+        run: |
+          DEVICES="${{ github.event.inputs.devices || env.DEFAULT_DEVICES }}"
+          DATE="${{ github.event.inputs.date || '' }}"
+          BUILD_ID="${{ github.event.inputs.build_id || '' }}"
+          echo "设备: $DEVICES 日期: '$DATE' 版本: '$BUILD_ID'"
+          # 抓一次页面，供所有设备复用
+          python3 scripts/resolve_build.py --list >/dev/null   # 隐式验证页面可抓取
+          python3 - <<'EOF' > matrix.json
+          import json, subprocess, sys, os
+          devices = os.environ.get("DEVICES", "").split()
+          date = os.environ.get("DATE", "")
+          build_id = os.environ.get("BUILD_ID", "")
+          include = []
+          for d in devices:
+              args = ["python3", "scripts/resolve_build.py", "--device", d, "--json"]
+              if build_id: args += ["--build-id", build_id]
+              elif date:   args += ["--date", date]
+              r = json.loads(subprocess.check_output(args))
+              include.append({"device": d, "version": r["version"], "url": r["url"]})
+          json.dump({"include": include}, sys.stdout)
+          EOF
+          echo "matrix=$(cat matrix.json | tr '\n' ' ')" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: resolve
+    runs-on: ubuntu-latest
+    timeout-minutes: 100
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix: ${{ fromJSON(needs.resolve.outputs.matrix) }}
+    env:
+      TAG: ${{ matrix.device }}-${{ matrix.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 显示磁盘空间
+        run: df -h / /mnt | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: 下载工厂包（断点续传，失败自动重试）
+        run: |
+          mkdir -p work/${{ matrix.device }}
+          for i in 1 2 3 4 5; do
+            echo "== 下载尝试 $i =="
+            python3 scripts/download.py "${{ matrix.url }}" "work/${{ matrix.device }}/factory.zip" && break
+            [ "$i" = 5 ] && exit 1
+            sleep 10
+          done
+
+      - name: 解压提取分区镜像
+        run: python3 scripts/extract.py work/${{ matrix.device }}/factory.zip work/${{ matrix.device }}
+
+      - name: 验证镜像有效性
+        run: python3 scripts/verify.py work/${{ matrix.device }}/images --out work/${{ matrix.device }}/verify.json
+
+      - name: 生成 SHA256SUMS / links.md（含附件直链）
+        env:
+          REPO: ${{ github.repository }}
+        run: |
+          python3 scripts/make_release.py work/${{ matrix.device }} \
+            --tag "$TAG" --version "${{ matrix.version }}" \
+            --factory-url "${{ matrix.url }}" \
+            --factory-size "$(stat -c%s work/${{ matrix.device }}/factory.zip)" \
+            --upload-glob "${{ github.event.inputs.upload_images || env.DEFAULT_UPLOAD_RE }}" \
+            --repo "$REPO"
+
+      - name: 上传 Actions Artifact（全部镜像 + 报告）
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.device }}-${{ matrix.version }}-all
+          path: |
+            work/${{ matrix.device }}/images/*.img
+            work/${{ matrix.device }}/verify.json
+            work/${{ matrix.device }}/resolve.json
+            work/${{ matrix.device }}/SHA256SUMS
+            work/${{ matrix.device }}/links.md
+          retention-days: 7
+          compression-level: 0
+
+      - name: 创建 Release 并上传镜像附件
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          bash scripts/publish_release.sh "${{ matrix.device }}" "$TAG" "${{ matrix.version }}" \
+            "${{ github.event.inputs.upload_images || env.DEFAULT_UPLOAD_RE }}" \
+            "${{ github.event.inputs.keep_factory || 'false' }}"
+
+      - name: 汇总
+        run: |
+          {
+            echo "## $TAG"
+            echo '- Release: https://github.com/'"$REPO_FULL"'/releases/tag/'"$TAG"
+            echo '- 官方工厂包: ${{ matrix.url }}'
+            echo '```'
+            cat "work/${{ matrix.device }}/SHA256SUMS"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+        env:
+          REPO_FULL: ${{ github.repository }}
