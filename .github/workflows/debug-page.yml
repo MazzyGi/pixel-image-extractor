@@ -3,56 +3,49 @@ on: workflow_dispatch
 jobs:
   dump:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - run: |
           pip install playwright -q
-          python3 -m playwright install chromium --with-deps >/dev/null 2>&1
+          python3 -m playwright install chromium --with-deps >/dev/null 2>&1 || true
+          # 从渲染页面拿 bluejay 包 URL+SHA
           python3 - <<'EOF'
-          import asyncio
-          from playwright.async_api import async_playwright
-
-          async def main():
-              reqs = []
-              async with async_playwright() as p:
-                  b = await p.chromium.launch()
-                  pg = await b.new_page()
-                  pg.on("request", lambda r: reqs.append(r.url))
-                  await pg.goto("https://developers.google.com/android/images?hl=en",
-                                wait_until="domcontentloaded", timeout=90000)
-                  await pg.wait_for_timeout(3000)
-                  # 尝试点击 Acknowledge
-                  for sel in ("text=Acknowledge", "button:has-text('Acknowledge')",
-                              "devsite-terms >> text=Acknowledge", "a:has-text('Acknowledge')"):
-                      try:
-                          el = await pg.query_selector(sel)
-                          if el:
-                              await el.click()
-                              print("CLICKED via", sel)
-                              break
-                      except Exception as e:
-                          print("click fail", sel, str(e)[:80])
-                  await pg.wait_for_timeout(6000)
-                  html = await pg.content()
-                  open("rendered.html", "w").write(html)
-                  links = await pg.eval_on_selector_all("a[href*='dl.google.com']",
-                                                        "els => els.map(e => e.href)")
-                  open("links.txt", "w").write("\n".join(links))
-                  print("bytes:", len(html), "links:", len(links))
-                  for l in links[:3]: print("  ", l)
-                  await b.close()
-              open("requests.txt", "w").write("\n".join(sorted(set(
-                  u for u in reqs if "google" in u and not any(
-                      x in u for x in (".js", "gstatic", "fonts", ".css", ".svg", ".png",
-                                       "analytics", "googletagmanager", "playwright"))))))
-          asyncio.run(main())
+          import subprocess, json
+          subprocess.run(["python3", "scripts/resolve_build.py", "--save-page", "page.html",
+                          "--device", "bluejay", "--json"], check=False)
           EOF
-          echo "== requests =="; head -25 requests.txt; echo "== links count =="; wc -l < links.txt
+        # 上面脚本不存在于 debug 环境 —— 改为 checkout 后运行
+      - uses: actions/checkout@v4
+      - run: |
+          pip install playwright -q
+          python3 -m playwright install chromium --with-deps >/dev/null 2>&1 || true
+          python3 scripts/resolve_build.py --save-page page.html --device bluejay --json > r.json
+          cat r.json
+          URL=$(python3 -c "import json;print(json.load(open('r.json'))['url'])")
+          SHA=$(python3 -c "import json;print(json.load(open('r.json'))['sha256'])")
+          # 下载工厂包（Actions 网络快）
+          curl -sL -o f.zip "$URL"
+          echo "$SHA  f.zip" | sha256sum -c -
+          unzip -o -q f.zip -d fx
+          inner=$(ls fx/*/image-*.zip)
+          unzip -o -q "$inner" -d imgs vendor_boot.img dtbo.img init_boot.img boot.img
+          python3 - <<'EOF'
+          import struct, json
+          for n in ("vendor_boot.img", "dtbo.img", "init_boot.img", "boot.img"):
+              d = open(f"imgs/{n}","rb").read(600)
+              print("==", n, "magic:", d[:8].hex(), d[:8])
+              if n == "vendor_boot.img":
+                  print("  hdr_ver", struct.unpack_from("<I", d, 8)[0],
+                        "page", struct.unpack_from("<I", d, 12)[0],
+                        "vrd_sz", struct.unpack_from("<I", d, 24)[0],
+                        "name", d[36:52],
+                        "hdr_sz", struct.unpack_from("<I", d, 52)[0],
+                        "dtb_sz", struct.unpack_from("<I", d, 56)[0])
+                  import os
+                  print("  file size:", os.path.getsize(f"imgs/{n}"))
+          EOF
       - uses: actions/upload-artifact@v4
         with:
-          name: probe5
-          path: |
-            rendered.html
-            links.txt
-            requests.txt
+          name: vb-heads
+          path: imgs/
           retention-days: 3
