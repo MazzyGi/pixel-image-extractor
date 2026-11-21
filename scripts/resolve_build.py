@@ -118,7 +118,10 @@ def resolve(devices: dict, code: str, date: str = "", build_id: str = "") -> dic
             raise SystemExit(f"[resolve] {code} 没有 ≤{date} 的版本")
         chosen = sorted(cands, key=lambda t: (t[0], t[1]))[-1][2]
     else:
-        chosen = builds[0]  # 页面顺序：最新在前
+        # 页面顺序不保证最新在前（首发版置顶）——按构建日期取最大；无日期时取第一行
+        dated = [(build_date(b["version"]), -i, b) for i, b in enumerate(builds)
+                 if build_date(b["version"])]
+        chosen = max(dated, key=lambda t: (t[0], t[1]))[2] if dated else builds[0]
     return {"codename": code.lower(), "device": dev["name"], **chosen}
 
 
@@ -146,7 +149,11 @@ def main():
 
     if a.list:
         for code, dev in devices.items():
-            print(f"{code:12s} {dev['name']:28s} {len(dev['builds']):3d} builds  latest={dev['builds'][0]['version']}")
+            dated = [(build_date(b["version"]), -i, b) for i, b in enumerate(dev["builds"])
+                     if build_date(b["version"])]
+            latest = (max(dated, key=lambda t: (t[0], t[1]))[2]["version"] if dated
+                      else dev["builds"][0]["version"])
+            print(f"{code:12s} {dev['name']:28s} {len(dev['builds']):3d} builds  latest={latest}")
         return
     if not a.device:
         ap.error("--device 或 --list 必选")

@@ -25,7 +25,13 @@ GitHub Actions 自动从 Google 官方工厂镜像页面（developers.google.com
 
 ### 定时构建
 
-默认每周一 03:30 UTC 自动构建 `DEFAULT` 设备的最新版（见 `build.yml` 中 cron 与 DEVICES 环境变量，可自行修改设备列表）。
+默认每周一 03:30 UTC 自动构建 `DEFAULT_DEVICES` 设备列表的最新版（改 `build.yml` 顶部 env 即可）。
+
+### 版本解析数据源
+
+官方页面 2026 年改版后表格由 JS 动态加载（需先点击法律声明的 Acknowledge），静态抓取拿不到任何链接。
+本项目用 **Playwright 无头浏览器**渲染页面后解析，同时取得每个工厂包的**官方 SHA-256**，下载完成后逐字节校验。
+"最新版"按版本号中的构建日期取最大（页面首行是出厂首发版，不是最新版）。
 
 ### 产物
 
@@ -40,12 +46,13 @@ GitHub Actions 自动从 Google 官方工厂镜像页面（developers.google.com
 
 | 对象 | 校验内容 |
 |---|---|
-| 工厂包 zip | HTTP 断点续传 + `unzip -t` 完整性测试 + 最小体积检查 |
-| `boot` / `init_boot` / `vendor_boot` / `recovery` | `ANDROID!` 魔数；header v0–v4 字段（kernel/ramdisk 大小、page size、os_version 解码）；按 page 对齐推算的最小体积与实际体积一致性；AVB footer |
+| 工厂包 zip | HTTP 断点续传 + **官方 SHA-256 逐字节校验** + `unzip -t` 完整性测试 + 最小体积检查 |
+| `boot` / `init_boot` / `recovery` | `ANDROID!` 魔数；header v0–v4 官方布局字段（kernel/ramdisk 大小、page size、os_version 解码、v4 signature_size）；按 page 对齐推算的最小体积与实际体积一致性；AVB footer |
+| `vendor_boot` | `VNDRBOOT` 魔数；v3/v4 官方布局（cmdline 内联 2048B、header_size@2096、dtb_size@2100、v4 ramdisk 表一致性校验）；最小体积一致性 |
 | `vbmeta*` | `AVB0` 头：libavb 版本、签名算法、rollback_index、flags、release_string、描述符链（hashtree/chain 覆盖的分区） |
 | 带 AVB footer 的镜像（system/vendor 等） | `AvBf` footer：`original_image_size`、`vbmeta_offset/size` 越界检查，指向的 vbmeta 头魔数 |
-| `dtbo.img` | `dt_table` 魔数 `0xd7b7ab1e` 与表头字段 |
-| sparse 镜像（system/vendor/product…） | sparse 魔数 `0x3aff26ed` 与块头字段（footer 尽力校验） |
+| `dtbo.img` | `dt_table` 魔数 `0xd7b7ab1e` 与表头字段（total_size/entry 数/偏移一致性）；非 dt_table 封装时回退 raw 校验 |
+| sparse 镜像（system/vendor/product…） | sparse 魔数 `0xed26ff3a`（小端）与块头字段 |
 | `bootloader-*` / `radio-*` | 厂商格式不做结构解析，仅记录 SHA256 |
 | 全部文件 | SHA256（写入 `SHA256SUMS`） |
 
@@ -63,6 +70,8 @@ GitHub Actions 自动从 Google 官方工厂镜像页面（developers.google.com
 | Pixel 6 | `oriole` | | Pixel 9 Pro XL | `komodo` |
 | Pixel 6 Pro | `raven` | | Pixel 9 Pro Fold | `comet` |
 | Pixel 6a | `bluejay` | | Pixel 9a | `tegu` |
+| Pixel 10 | `frankel` | | Pixel 10 Pro | `blazer` |
+| Pixel 10 Pro XL | `mustang` | | Pixel 10 Pro Fold | `rango` |
 
 > Android 13 起的设备（Pixel 7 系列及以后、Pixel 6/6a/6 Pro 升级 13 后）才有 `init_boot.img`（GKI 通用内核 init ramdisk，Magisk/KernelSU 刷补丁用的就是它）。
 
