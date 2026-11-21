@@ -50,9 +50,9 @@ jobs:
       - name: 解析设备 -> 版本
         id: mk
         run: |
-          DEVICES="${{ github.event.inputs.devices || env.DEFAULT_DEVICES }}"
-          DATE="${{ github.event.inputs.date || '' }}"
-          BUILD_ID="${{ github.event.inputs.build_id || '' }}"
+          export DEVICES="${{ github.event.inputs.devices || env.DEFAULT_DEVICES }}"
+          export DATE="${{ github.event.inputs.date || '' }}"
+          export BUILD_ID="${{ github.event.inputs.build_id || '' }}"
           echo "设备: $DEVICES 日期: '$DATE' 版本: '$BUILD_ID'"
           # 抓一次页面，供所有设备复用
           python3 scripts/resolve_build.py --list >/dev/null   # 隐式验证页面可抓取

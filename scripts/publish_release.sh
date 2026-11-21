@@ -45,6 +45,7 @@ done
 
 # 4. Release 说明
 DEVICE_NAME=$(python3 -c "import json;print(json.load(open('$DIR/resolve.json'))['device'])")
+FACTORY_URL=$(python3 -c "import json;print(json.load(open('$DIR/resolve.json'))['url'])")
 cat > "$DIR/notes.md" <<EOF
 # $DEVICE_NAME ($DEVICE) — $VERSION
 
@@ -59,9 +60,6 @@ cat > "$DIR/notes.md" <<EOF
 
 \`verify.json\` 为结构化验证报告（boot header / AVB / dtbo / sparse）。
 EOF
-# 回填官方链接
-FACTORY_URL=$(python3 -c "import json;print(json.load(open('$DIR/resolve.json'))['url'])")
-sed -i "s|^官方工厂包: .*|官方工厂包: $FACTORY_URL|" "$DIR/notes.md"
 
 # 5. 创建 Release（存在则复用）并上传
 if ! gh release view "$TAG" -R "$REPO" >/dev/null 2>&1; then
