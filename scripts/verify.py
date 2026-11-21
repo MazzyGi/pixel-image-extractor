@@ -83,6 +83,9 @@ def check_android_boot(d: bytes, size: int) -> dict:
                        + pages(info.get("recovery_dtbo_size", 0), page)
                        + pages(info.get("dtb_size", 0), page))
     elif ver in (3, 4):
+        # 官方 v3/v4: kernel@8 ramdisk@12 os_version@16 header_size@20
+        #             reserved[4]@24..40 header_version@40 cmdline[1536]@44
+        #             (v4) signature_size @ 44+1536 = 1580
         kernel_size, ramdisk_size = u32(d, 8), u32(d, 12)
         osv, hdr_sz = u32(d, 16), u32(d, 20)
         cmdline = d[44:44 + 1536].split(b"\0")[0].decode("ascii", "replace")
@@ -91,9 +94,12 @@ def check_android_boot(d: bytes, size: int) -> dict:
                     cmdline=cmdline[:80])
         page = 4096
         used = page * (1 + pages(kernel_size, page) + pages(ramdisk_size, page))
+        if hdr_sz and hdr_sz < page:
+            # header_size 覆盖第 0 页内的实际头长（1580/1572），不影响页计算
+            pass
         if ver == 4:
-            sig = u32(d, 2604) if len(d) > 2608 else 0
-            info["boot_signature_size"] = sig
+            sig = u32(d, 1580) if len(d) >= 1584 else 0
+            info["signature_size"] = sig
             used += page * pages(sig, page)
     else:
         return {"ok": False, "error": f"未知 boot header version {ver}"}
@@ -109,36 +115,28 @@ def check_android_boot(d: bytes, size: int) -> dict:
 
 
 def check_vendor_boot(d: bytes, size: int) -> dict:
-    """vendor_boot（VNDRBOOT，v3/v4）。AOSP bootimg.h:
-    magic(8) header_version(4) page_size(4) kernel_addr(4) ramdisk_addr(4)
-    vendor_ramdisk_size(4) @24, cmdline_size(4) @28, tags_addr(4) @32? —— 实际:
-    struct vendor_boot_img_hdr_v4: magic, hdr_ver, page_size, kernel_addr, ramdisk_addr,
-      vendor_ramdisk_size(+20? ), ...
-    以 mkbootimg 源为准（v4）:
-      0  magic VNDRBOOT
-      8  header_version  u32
-      12 page_size       u32
-      16 kernel_addr     u32
-      20 ramdisk_addr    u32
-      24 vendor_ramdisk_size u32
-      28 cmdline_size    u32
-      32 tags_addr       u32
-      36 name[16]        -> 36..52
-      52 header_size     u32
-      56 dtb_size        u32
-      60 dtb_addr        u64
-      (v4) 68 ramdisk_table_offset..., 仍以 header_size 为准
+    """vendor_boot（VNDRBOOT，v3/v4）。官方布局（source.android.com）:
+      magic[8] @0, header_version @8, page_size @12, kernel_addr @16, ramdisk_addr @20,
+      vendor_ramdisk_size @24,
+      cmdline[2048] @28,           <- 内联字符串数组
+      tags_addr @2076, name[16] @2080,
+      header_size @2096, dtb_size @2100, dtb_addr(u64) @2104,
+      (v4) vendor_ramdisk_table_size @2112, ...entry_num @2116,
+           ...entry_size @2120, bootconfig_size @2124
+    头大小: v3=2112, v4=2128
     """
     if d[:8] != VENDOR_BOOT_MAGIC:
         return {"ok": False, "error": "vendor_boot magic 不匹配 (VNDRBOOT)"}
     ver, page = u32(d, 8), u32(d, 12)
     vrd_size = u32(d, 24)
-    name = d[36:52].split(b"\0")[0].decode("ascii", "replace")
-    hdr_sz = u32(d, 52)
-    dtb_size = u32(d, 56)
+    cmdline = d[28:28 + 2048].split(b"\0")[0].decode("ascii", "replace")
+    name = d[2080:2096].split(b"\0")[0].decode("ascii", "replace")
+    hdr_sz = u32(d, 2096)
+    dtb_size = u32(d, 2100)
     info = {"ok": True, "type": "vendor_boot", "header_version": ver,
             "page_size": page, "vendor_ramdisk_size": vrd_size,
-            "dtb_size": dtb_size, "header_size": hdr_sz, "name": name}
+            "header_size": hdr_sz, "dtb_size": dtb_size, "name": name,
+            "cmdline": cmdline[:60]}
     if ver not in (3, 4):
         info["ok"] = False
         info["error"] = f"未知 vendor_boot header version {ver}"
@@ -147,8 +145,26 @@ def check_vendor_boot(d: bytes, size: int) -> dict:
         info["ok"] = False
         info["error"] = f"非常规 page_size {page}"
         return info
-    # v4 含 ramdisk table，其大小无法从头 512B 直接得知；used 是下界估计
-    used = page * pages(max(hdr_sz, page), page) + page * pages(vrd_size, page) + page * pages(dtb_size, page)
+    expect_hdr = 2112 if ver == 3 else 2128
+    if hdr_sz not in (0, expect_hdr):  # 有些老镜像 header_size=0
+        info["ok"] = False
+        info["error"] = f"header_size 异常: {hdr_sz}（期望 {expect_hdr}）"
+        return info
+    used = (pages(max(hdr_sz, expect_hdr), page) + pages(vrd_size, page)
+            + pages(dtb_size, page)) * page
+    if ver == 4:
+        vrt_size = u32(d, 2112)
+        vrt_num = u32(d, 2116)
+        vrt_ent = u32(d, 2120)
+        bc_size = u32(d, 2124)
+        info.update(vendor_ramdisk_table_size=vrt_size, ramdisk_table_entries=vrt_num,
+                    bootconfig_size=bc_size)
+        used += (pages(vrt_size, page) + pages(bc_size, page)) * page
+        # 表项一致性
+        if vrt_ent and vrt_size and vrt_size != vrt_num * vrt_ent:
+            info["ok"] = False
+            info["error"] = f"ramdisk 表不一致: {vrt_size} != {vrt_num}*{vrt_ent}"
+            return info
     info["min_size"] = used
     info["size_match"] = size >= used
     info["ok"] = bool(info["size_match"])
